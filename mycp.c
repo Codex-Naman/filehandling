@@ -29,6 +29,7 @@
 #define DEFAULT_BUFFER (1024U * 1024U)
 #define MAX_BUFFER (64U * 1024U * 1024U)
 #define COPY_MODE 0777
+#define PROGRESS_WIDTH 30U
 
 struct options {
     size_t buffer_size;
@@ -199,7 +200,19 @@ static void print_progress(const char *path, uint64_t done, uint64_t total)
 {
     char line[PATH_MAX + 128];
     unsigned percent = total ? (unsigned)((done * 100ULL) / total) : 100U;
-    int n = snprintf(line, sizeof(line), "\r[%3u%%] %s (%llu/%llu bytes)", percent,
+    if (percent > 100U) percent = 100U;
+
+    unsigned filled = (percent * PROGRESS_WIDTH) / 100U;
+    char bar[PROGRESS_WIDTH + 1U];
+    for (unsigned i = 0; i < PROGRESS_WIDTH; i++) bar[i] = '-';
+    if (filled == PROGRESS_WIDTH) {
+        for (unsigned i = 0; i < PROGRESS_WIDTH; i++) bar[i] = '#';
+    } else if (filled > 0) {
+        for (unsigned i = 0; i < filled; i++) bar[i] = '#';
+    }
+    bar[PROGRESS_WIDTH] = '\0';
+
+    int n = snprintf(line, sizeof(line), "\r[%s%u%%] %s (%llu/%llu bytes)", bar, percent,
                      path, (unsigned long long)done, (unsigned long long)total);
     if (n > 0) (void)write_all(STDERR_FILENO, line, (size_t)n);
 }
@@ -357,7 +370,7 @@ static int copy_tree(const char *source, const char *dest, const struct options 
 
 int main(int argc, char **argv)
 {
-    struct options opt = { .buffer_size = DEFAULT_BUFFER };
+    struct options opt = { .buffer_size = DEFAULT_BUFFER, .progress = 1 };
     const char *source = NULL, *dest = NULL;
     for (int i = 1; i < argc; i++) {
         const char *arg = argv[i];
