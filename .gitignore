@@ -1,3 +1,5 @@
-/.test-build/
+/build/
 /coverage/
+/mycp
 /mycp.c.gcov
+/coverage/mycp_core.c.gcov

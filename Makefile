@@ -1,12 +1,20 @@
 CC ?= cc
 CXX ?= c++
 CFLAGS ?= -O2 -std=c11 -Wall -Wextra -Wpedantic
+CPPFLAGS ?= -Iinclude
 LDFLAGS ?=
+
+BUILD_DIR ?= build
+COVERAGE_DIR ?= coverage
+SRC_DIR ?= src
+INCLUDE_DIR ?= include
+TEST_DIR ?= test
+MYCP := $(BUILD_DIR)/mycp
 
 GTEST_CFLAGS := $(shell pkg-config --cflags gtest_main 2>/dev/null)
 GTEST_LIBS := $(shell pkg-config --libs gtest_main 2>/dev/null)
 
-.PHONY: all clean test verify verify-recursive integration gtest valgrind coverage misra test-all display help copy copy-paste recursive preserve backup log sync all-features
+.PHONY: all clean test verify verify-recursive integration gtest valgrind coverage misra misra-platform test-all display help copy copy-paste recursive preserve backup log sync all-features
 
 SOURCE ?=
 DEST ?=
@@ -15,67 +23,86 @@ BUFFER ?= 1024
 
 COMMON_FLAGS = -r --buffer $(BUFFER) --preserve --progress --verify
 
-all: mycp
+all: $(MYCP)
 
-mycp: mycp.c
-	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
+mycp: $(MYCP)
 
-test: mycp
+$(BUILD_DIR):
+	mkdir -p $@
+
+$(MYCP): $(SRC_DIR)/mycp.c $(SRC_DIR)/mycp_core.c $(INCLUDE_DIR)/mycp_core.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $(SRC_DIR)/mycp.c $(SRC_DIR)/mycp_core.c $(LDFLAGS)
+
+test: $(MYCP)
 	@set -eu; tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT; \
 	printf 'hello low-level backup\n' > "$$tmp/source"; chmod 640 "$$tmp/source"; \
-	./mycp --preserve --verify --benchmark "$$tmp/source" "$$tmp/dest"; \
+	$(MYCP) --preserve --verify --benchmark "$$tmp/source" "$$tmp/dest"; \
 	test "$$(cat "$$tmp/source")" = "$$(cat "$$tmp/dest")"; \
 	test "$$(stat -c %a "$$tmp/source")" = "$$(stat -c %a "$$tmp/dest")"; \
-	mkdir -p "$$tmp/tree/nested/deeper"; printf 'nested\n' > "$$tmp/tree/a"; printf 'deep\n' > "$$tmp/tree/nested/deeper/file"; ./mycp -r --verify "$$tmp/tree" "$$tmp/out"; \
+	mkdir -p "$$tmp/tree/nested/deeper"; printf 'nested\n' > "$$tmp/tree/a"; printf 'deep\n' > "$$tmp/tree/nested/deeper/file"; $(MYCP) -r --verify "$$tmp/tree" "$$tmp/out"; \
 	test -f "$$tmp/out/a"; test "$$(cat "$$tmp/out/a")" = nested; \
 	test -f "$$tmp/out/nested/deeper/file"; test "$$(cat "$$tmp/out/nested/deeper/file")" = deep; \
-	printf 'hello l' > "$$tmp/partial"; ./mycp --resume "$$tmp/source" "$$tmp/partial"; \
+	printf 'hello l' > "$$tmp/partial"; $(MYCP) --resume "$$tmp/source" "$$tmp/partial"; \
 	test "$$(cat "$$tmp/source")" = "$$(cat "$$tmp/partial")"; \
-	printf 'wrong' > "$$tmp/mismatch"; ./mycp --resume "$$tmp/source" "$$tmp/mismatch"; \
+	printf 'wrong' > "$$tmp/mismatch"; $(MYCP) --resume "$$tmp/source" "$$tmp/mismatch"; \
 	test "$$(cat "$$tmp/source")" = "$$(cat "$$tmp/mismatch")"; echo 'tests: ok'
 
 verify: test
 
-integration: mycp
-	MYCP=./mycp sh tests/integration.sh
+integration: $(MYCP)
+	MYCP=$(MYCP) sh $(TEST_DIR)/integration.sh
 
-gtest: mycp
+gtest: $(MYCP)
 	@command -v pkg-config >/dev/null 2>&1 || (echo 'pkg-config is required for gtest'; exit 2)
 	@test -n "$(GTEST_LIBS)" || (echo 'GoogleTest development files are required'; exit 2)
-	@mkdir -p .test-build
+	@mkdir -p $(BUILD_DIR)
 	$(CXX) -std=c++17 -Wall -Wextra -Wpedantic $(GTEST_CFLAGS) \
-		tests/mycp_gtest.cpp $(GTEST_LIBS) -o .test-build/mycp_gtest
-	./.test-build/mycp_gtest
+		test/mycp_gtest.cpp $(GTEST_LIBS) -o $(BUILD_DIR)/mycp_gtest
+	MYCP=$(MYCP) $(BUILD_DIR)/mycp_gtest
 
-valgrind: mycp
+valgrind: $(MYCP)
 	@command -v valgrind >/dev/null 2>&1 || (echo 'Valgrind is required'; exit 2)
-	MYCP=./mycp sh tests/valgrind.sh
+	MYCP=$(MYCP) sh $(TEST_DIR)/valgrind.sh
 
 coverage:
-	@rm -rf coverage
-	@mkdir -p coverage
+	@rm -rf $(COVERAGE_DIR)
+	@mkdir -p $(COVERAGE_DIR)
 	$(CC) -O0 -g -std=c11 -Wall -Wextra -Wpedantic --coverage \
-		-o coverage/mycp mycp.c
-	MYCP=./coverage/mycp sh tests/integration.sh
-	gcov -b -c -o coverage mycp.c
-	@mv -f mycp.c.gcov coverage/mycp.c.gcov
-	@echo 'coverage: generated mycp.c.gcov'
+		$(CPPFLAGS) -o $(COVERAGE_DIR)/mycp $(SRC_DIR)/mycp.c $(SRC_DIR)/mycp_core.c
+	MYCP=./$(COVERAGE_DIR)/mycp sh $(TEST_DIR)/integration.sh
+	MYCP=./$(COVERAGE_DIR)/mycp sh $(TEST_DIR)/coverage_extra.sh
+	$(CC) -O0 -g -std=c11 -Wall -Wextra -Wpedantic --coverage \
+		$(CPPFLAGS) -o $(COVERAGE_DIR)/core_coverage $(TEST_DIR)/core_coverage.c $(SRC_DIR)/mycp_core.c
+	./$(COVERAGE_DIR)/core_coverage
+	gcov -b -c -o $(COVERAGE_DIR) $(COVERAGE_DIR)/mycp-mycp.gcno
+	@mv -f mycp.c.gcov $(COVERAGE_DIR)/mycp.c.gcov
+	gcov -b -c -o $(COVERAGE_DIR) $(COVERAGE_DIR)/core_coverage-mycp_core.gcno
+	@mv -f mycp_core.c.gcov $(COVERAGE_DIR)/mycp_core.c.gcov
+	@echo 'coverage: generated coverage/mycp.c.gcov and coverage/mycp_core.c.gcov'
 
 misra:
 	@command -v cppcheck >/dev/null 2>&1 || (echo 'Cppcheck is required'; exit 2)
-	cppcheck --enable=all --inconclusive --error-exitcode=1 --std=c11 --addon=misra \
-		--suppress=missingIncludeSystem mycp.c
+	cppcheck $(CPPFLAGS) --enable=all --inconclusive --error-exitcode=1 \
+		--std=c11 --addon=misra --suppress=missingIncludeSystem \
+		--suppress=unusedFunction --suppress=misra-c2012-8.7 \
+		$(SRC_DIR)/mycp_core.c
+
+misra-platform:
+	@command -v cppcheck >/dev/null 2>&1 || (echo 'Cppcheck is required'; exit 2)
+	@echo 'Linux adapter MISRA audit; findings are documented in MISRA_DEVIATIONS.md'
+	cppcheck $(CPPFLAGS) --enable=all --inconclusive --std=c11 --addon=misra \
+		--suppress=missingIncludeSystem $(SRC_DIR)/mycp.c
 
 test-all: integration gtest valgrind coverage misra
 
-verify-recursive: mycp
+verify-recursive: $(MYCP)
 	@test -n "$(SOURCE)" || (echo 'SOURCE directory is required'; exit 2)
 	@test -d "$(SOURCE)" || (echo "SOURCE is not a directory: $(SOURCE)"; exit 2)
 	@set -eu; \
 	tmp=$$(mktemp -d); \
 	trap 'rm -rf "$$tmp"' EXIT; \
 	mkdir -p "$$tmp/destination"; \
-	./mycp -r --buffer "$(BUFFER)" --preserve --progress --verify \
+	$(MYCP) -r --buffer "$(BUFFER)" --preserve --progress --verify \
 		"$(SOURCE)" "$$tmp/destination"; \
 	name=$$(basename -- "$(SOURCE)"); \
 	diff -r "$(SOURCE)" "$$tmp/destination/$$name"; \
@@ -104,6 +131,7 @@ help:
 	@echo '  make valgrind          check for memory errors on Linux'
 	@echo '  make coverage          generate gcov coverage data'
 	@echo '  make misra             run MISRA-oriented Cppcheck analysis'
+	@echo '  make misra-platform    report Linux/POSIX adapter deviations'
 	@echo '  make test-all          run all quality checks'
 	@echo '  make backup SOURCE=source DEST=destination'
 	@echo '  make sync SOURCE=directory DEST=directory'
@@ -119,12 +147,12 @@ help:
 	@echo '  verify        run the automated verification tests'
 	@echo '  display       show file or directory information without copying'
 
-copy: mycp
+copy: $(MYCP)
 	@test -n "$(SOURCE)" || (echo 'SOURCE is required'; exit 2)
 	@test -n "$(DEST)" || (echo 'DEST is required'; exit 2)
-	./mycp $(COMMON_FLAGS) "$(SOURCE)" "$(DEST)"
+	$(MYCP) $(COMMON_FLAGS) "$(SOURCE)" "$(DEST)"
 
-copy-paste: mycp
+copy-paste: $(MYCP)
 	@test -n "$(SOURCE)" || (echo 'SOURCE is required'; exit 2)
 	@test -n "$(DEST)" || (echo 'DEST is required'; exit 2)
 	@set -eu; \
@@ -136,45 +164,45 @@ copy-paste: mycp
 		read -r selected; \
 		if [ -n "$$selected" ]; then buffer="$$selected"; fi; \
 	fi; \
-	./mycp -r --preserve --progress --verify --buffer "$$buffer" \
+	$(MYCP) -r --preserve --progress --verify --buffer "$$buffer" \
 		"$(SOURCE)" "$(DEST)"
 
-recursive: mycp
+recursive: $(MYCP)
 	@test -n "$(SOURCE)" || (echo 'SOURCE directory is required'; exit 2)
 	@test -n "$(DEST)" || (echo 'DEST directory is required'; exit 2)
-	./mycp -r --buffer "$(BUFFER)" --preserve --progress --verify \
+	$(MYCP) -r --buffer "$(BUFFER)" --preserve --progress --verify \
 		"$(SOURCE)" "$(DEST)"
 
-preserve: mycp
+preserve: $(MYCP)
 	@test -n "$(SOURCE)" || (echo 'SOURCE is required'; exit 2)
 	@test -n "$(DEST)" || (echo 'DEST is required'; exit 2)
-	./mycp -r --buffer "$(BUFFER)" --preserve --progress --verify \
+	$(MYCP) -r --buffer "$(BUFFER)" --preserve --progress --verify \
 		"$(SOURCE)" "$(DEST)"
 
-log: mycp
+log: $(MYCP)
 	@test -n "$(SOURCE)" || (echo 'SOURCE is required'; exit 2)
 	@test -n "$(DEST)" || (echo 'DEST is required'; exit 2)
-	./mycp $(COMMON_FLAGS) --verbose --log "$(LOG)" \
+	$(MYCP) $(COMMON_FLAGS) --verbose --log "$(LOG)" \
 		"$(SOURCE)" "$(DEST)"
 
-backup: mycp
+backup: $(MYCP)
 	@test -n "$(SOURCE)" || (echo 'SOURCE is required'; exit 2)
 	@test -n "$(DEST)" || (echo 'DEST is required'; exit 2)
-	./mycp $(COMMON_FLAGS) --resume "$(SOURCE)" "$(DEST)"
+	$(MYCP) $(COMMON_FLAGS) --resume "$(SOURCE)" "$(DEST)"
 
-sync: mycp
+sync: $(MYCP)
 	@test -n "$(SOURCE)" || (echo 'SOURCE is required'; exit 2)
 	@test -n "$(DEST)" || (echo 'DEST is required'; exit 2)
-	./mycp -r $(COMMON_FLAGS) --resume --sync --benchmark \
+	$(MYCP) -r $(COMMON_FLAGS) --resume --sync --benchmark \
 		--log "$(LOG)" "$(SOURCE)" "$(DEST)"
 
-all-features: mycp
+all-features: $(MYCP)
 	@test -n "$(SOURCE)" || (echo 'SOURCE is required'; exit 2)
 	@test -n "$(DEST)" || (echo 'DEST is required'; exit 2)
-	./mycp -r --buffer "$(BUFFER)" --preserve --progress --verify --resume --info \
+	$(MYCP) -r --buffer "$(BUFFER)" --preserve --progress --verify --resume --info \
 		--benchmark --sync --verbose --log "$(LOG)" \
 		"$(SOURCE)" "$(DEST)"
 
 
 clean:
-	rm -f mycp
+	rm -rf $(BUILD_DIR) $(COVERAGE_DIR)

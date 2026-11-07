@@ -22,13 +22,14 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "mycp_core.h"
+
 #ifndef SYS_getdents64
 #define SYS_getdents64 __NR_getdents64
 #endif
 
 #define DEFAULT_BUFFER 1024U
 #define MAX_BUFFER (64U * 1024U * 1024U)
-#define COPY_MODE 0777
 #define PROGRESS_WIDTH 10U
 
 struct options {
@@ -64,6 +65,59 @@ struct linux_dirent64 {
 static int log_fd = -1;
 
 static int write_all(int fd, const void *data, size_t len);
+static void print_progress(const char *path, uint64_t done, uint64_t total);
+
+struct fd_io_context {
+    int fd;
+};
+
+struct copy_io_context {
+    int input_fd;
+    int output_fd;
+    const struct options *options;
+    const char *path;
+    uint64_t *done;
+    uint64_t total;
+};
+
+static int fd_read(void *context, uint8_t *buffer, size_t capacity, size_t *count)
+{
+    struct fd_io_context *io = context;
+    ssize_t result;
+
+    do {
+        result = read(io->fd, buffer, capacity);
+    } while ((result < 0) && (errno == EINTR));
+
+    if (result < 0) return -1;
+    *count = (size_t)result;
+    return 0;
+}
+
+static int copy_read(void *context, uint8_t *buffer, size_t capacity, size_t *count)
+{
+    struct copy_io_context *io = context;
+    ssize_t result;
+
+    do {
+        result = read(io->input_fd, buffer, capacity);
+    } while ((result < 0) && (errno == EINTR));
+
+    if (result < 0) return -1;
+    *count = (size_t)result;
+    return 0;
+}
+
+static int copy_write(void *context, const uint8_t *buffer, size_t count)
+{
+    struct copy_io_context *io = context;
+    if (write_all(io->output_fd, buffer, count) < 0) return -1;
+    *io->done += (uint64_t)count;
+    if (io->options->progress != 0) {
+        print_progress(io->path, *io->done, io->total);
+    }
+    return 0;
+}
 
 static void usage(const char *name)
 {
@@ -142,12 +196,12 @@ static int parse_size(const char *text, size_t *value)
 {
     char *end;
     unsigned long long number = strtoull(text, &end, 10);
-    if (end == text || number == 0 || number > MAX_BUFFER) return -1;
-    if (*end == 'K' || *end == 'k') number *= 1024ULL;
-    else if (*end == 'M' || *end == 'm') number *= 1024ULL * 1024ULL;
-    else if (*end == 'G' || *end == 'g') number *= 1024ULL * 1024ULL * 1024ULL;
+    if ((end == text) || (number == 0ULL) || (number > MAX_BUFFER)) return -1;
+    if ((*end == 'K') || (*end == 'k')) number *= 1024ULL;
+    else if ((*end == 'M') || (*end == 'm')) number *= (1024ULL * 1024ULL);
+    else if ((*end == 'G') || (*end == 'g')) number *= (1024ULL * 1024ULL * 1024ULL);
     else if (*end != '\0') return -1;
-    if (number == 0 || number > MAX_BUFFER) return -1;
+    if ((number == 0ULL) || (number > MAX_BUFFER)) return -1;
     *value = (size_t)number;
     return 0;
 }
@@ -166,7 +220,7 @@ static int path_is_dir(const char *path, struct stat *st)
 {
     int fd = open_ro(path);
     if (fd < 0) return -1;
-    int result = (syscall(SYS_fstat, fd, st) == 0 && S_ISDIR(st->st_mode));
+    int result = ((syscall(SYS_fstat, fd, st) == 0) && S_ISDIR(st->st_mode));
     int saved = errno;
     syscall(SYS_close, fd);
     errno = saved;
@@ -176,13 +230,13 @@ static int path_is_dir(const char *path, struct stat *st)
 static const char *base_name(const char *path)
 {
     const char *slash = strrchr(path, '/');
-    return slash ? slash + 1 : path;
+    return (slash != NULL) ? (slash + 1) : path;
 }
 
 static int join_path(char *out, size_t size, const char *left, const char *right)
 {
-    int n = snprintf(out, size, "%s%s%s", left, (left[0] && left[strlen(left)-1] == '/') ? "" : "/", right);
-    return n >= 0 && (size_t)n < size ? 0 : (errno = ENAMETOOLONG, -1);
+    int n = snprintf(out, size, "%s%s%s", left, ((left[0] != '\0') && (left[strlen(left)-1] == '/')) ? "" : "/", right);
+    return ((n >= 0) && ((size_t)n < size)) ? 0 : (errno = ENAMETOOLONG, -1);
 }
 
 static void show_info(const char *path, const struct stat *st)
@@ -207,7 +261,7 @@ static void print_progress(const char *path, uint64_t done, uint64_t total)
 
     char bar[PROGRESS_WIDTH + 1U];
     for (unsigned i = 0; i < PROGRESS_WIDTH; i++) {
-        bar[i] = i < bucket ? '#' : '-';
+        bar[i] = (i < bucket) ? '#' : '-';
     }
     bar[PROGRESS_WIDTH] = '\0';
 
@@ -218,39 +272,65 @@ static void print_progress(const char *path, uint64_t done, uint64_t total)
 
 static int verify_file(const char *source, const char *dest, size_t buffer_size)
 {
-    int a = open_ro(source), b = open_ro(dest);
-    if (a < 0 || b < 0) { int e = errno; if (a >= 0) syscall(SYS_close, a); if (b >= 0) syscall(SYS_close, b); errno = e; return -1; }
-    char *buf_a = malloc(buffer_size), *buf_b = malloc(buffer_size);
-    if (!buf_a || !buf_b) { free(buf_a); free(buf_b); syscall(SYS_close, a); syscall(SYS_close, b); errno = ENOMEM; return -1; }
-    int result = 0;
-    for (;;) {
-        ssize_t na = read(a, buf_a, buffer_size), nb = read(b, buf_b, buffer_size);
-        if (na < 0 || nb < 0) { result = -1; break; }
-        if (na != nb || (na > 0 && memcmp(buf_a, buf_b, (size_t)na) != 0)) { errno = EIO; result = -1; break; }
-        if (na == 0) break;
+    int source_fd = open_ro(source);
+    int destination_fd = open_ro(dest);
+    int result = -1;
+    uint8_t *source_buffer = NULL;
+    uint8_t *destination_buffer = NULL;
+
+    if ((source_fd >= 0) && (destination_fd >= 0)) {
+        source_buffer = malloc(buffer_size);
+        destination_buffer = malloc(buffer_size);
+        if ((source_buffer != NULL) && (destination_buffer != NULL)) {
+            struct fd_io_context source_context = { source_fd };
+            struct fd_io_context destination_context = { destination_fd };
+            mycp_core_io_t source_io = { &source_context, fd_read, NULL };
+            mycp_core_io_t destination_io = { &destination_context, fd_read, NULL };
+            result = mycp_core_verify(&source_io, &destination_io,
+                                      source_buffer, destination_buffer,
+                                      buffer_size);
+        } else {
+            errno = ENOMEM;
+        }
     }
-    free(buf_a); free(buf_b); syscall(SYS_close, a); syscall(SYS_close, b);
+    free(source_buffer);
+    free(destination_buffer);
+    if (source_fd >= 0) syscall(SYS_close, source_fd);
+    if (destination_fd >= 0) syscall(SYS_close, destination_fd);
     return result;
 }
 
 static int prefix_matches(const char *source, const char *dest, off_t prefix,
                           size_t buffer_size)
 {
-    int a = open_ro(source), b = open_ro(dest);
-    if (a < 0 || b < 0) { int e = errno; if (a >= 0) syscall(SYS_close, a); if (b >= 0) syscall(SYS_close, b); errno = e; return -1; }
-    char *buf_a = malloc(buffer_size), *buf_b = malloc(buffer_size);
-    if (!buf_a || !buf_b) { free(buf_a); free(buf_b); syscall(SYS_close, a); syscall(SYS_close, b); errno = ENOMEM; return -1; }
-    off_t remaining = prefix;
-    int result = 1;
-    while (remaining > 0) {
-        size_t want = remaining < (off_t)buffer_size ? (size_t)remaining : buffer_size;
-        ssize_t na = read(a, buf_a, want), nb = read(b, buf_b, want);
-        if (na < 0 || nb < 0) { result = -1; break; }
-        if (na != nb || memcmp(buf_a, buf_b, (size_t)na) != 0) { result = 0; break; }
-        if (na == 0) { result = 0; break; }
-        remaining -= na;
+    int source_fd = open_ro(source);
+    int destination_fd = open_ro(dest);
+    int result = -1;
+    int matches = 0;
+    uint8_t *source_buffer = NULL;
+    uint8_t *destination_buffer = NULL;
+
+    if ((source_fd >= 0) && (destination_fd >= 0)) {
+        source_buffer = malloc(buffer_size);
+        destination_buffer = malloc(buffer_size);
+        if ((source_buffer != NULL) && (destination_buffer != NULL)) {
+            struct fd_io_context source_context = { source_fd };
+            struct fd_io_context destination_context = { destination_fd };
+            mycp_core_io_t source_io = { &source_context, fd_read, NULL };
+            mycp_core_io_t destination_io = { &destination_context, fd_read, NULL };
+            result = mycp_core_prefix_matches(&source_io, &destination_io,
+                                              source_buffer, destination_buffer,
+                                              buffer_size, (uint64_t)prefix,
+                                              &matches);
+            if (result == 0) result = matches;
+        } else {
+            errno = ENOMEM;
+        }
     }
-    free(buf_a); free(buf_b); syscall(SYS_close, a); syscall(SYS_close, b);
+    free(source_buffer);
+    free(destination_buffer);
+    if (source_fd >= 0) syscall(SYS_close, source_fd);
+    if (destination_fd >= 0) syscall(SYS_close, destination_fd);
     return result;
 }
 
@@ -264,7 +344,8 @@ static int copy_file(const char *source, const char *dest, const struct stat *so
     if (dst_exists && S_ISDIR(dst_st.st_mode)) { errno = EISDIR; syscall(SYS_close, in); emit_log("ERROR", "open-destination", dest, errno); return -1; }
     int flags = O_WRONLY | O_CREAT | O_CLOEXEC;
     off_t start = 0;
-    if (opt->resume && dst_exists && S_ISREG(dst_st.st_mode) && dst_st.st_size > 0 && dst_st.st_size < source_st->st_size) {
+    if ((opt->resume) && (dst_exists) && S_ISREG(dst_st.st_mode) &&
+        (dst_st.st_size > 0) && (dst_st.st_size < source_st->st_size)) {
         int prefix_ok = prefix_matches(source, dest, dst_st.st_size, opt->buffer_size);
         if (prefix_ok < 0) { int e = errno; syscall(SYS_close, in); errno = e; return -1; }
         if (prefix_ok == 1) {
@@ -285,20 +366,16 @@ static int copy_file(const char *source, const char *dest, const struct stat *so
     uint64_t done = (uint64_t)start;
     double begin = now_seconds();
     if (opt->verbose) emit_log("INFO", start ? "resume" : "copy", source, 0);
-    for (;;) {
-        ssize_t n = read(in, buffer, opt->buffer_size);
-        if (n < 0) { if (errno == EINTR) continue; break; }
-        if (n == 0) break;
-        if (write_all(out, buffer, (size_t)n) < 0) break;
-        done += (uint64_t)n;
-        if (opt->progress) {
-            print_progress(dest, done, (uint64_t)source_st->st_size);
-        }
-    }
-    int saved = errno;
+    struct copy_io_context copy_context = { in, out, opt, dest, &done, (uint64_t)source_st->st_size };
+    mycp_core_io_t copy_io = { &copy_context, copy_read, copy_write };
+    uint64_t copied = 0U;
+    int copy_status = mycp_core_copy(&copy_io, (uint8_t *)buffer, opt->buffer_size,
+                                     (uint64_t)source_st->st_size - (uint64_t)start,
+                                     &copied);
+    int saved = (copy_status < 0) ? errno : 0;
     free(buffer);
-    if (syscall(SYS_fsync, out) < 0 && saved == 0) saved = errno;
-    if (opt->preserve && syscall(SYS_fchmod, out, source_st->st_mode & 07777) < 0 && saved == 0) saved = errno;
+    if ((syscall(SYS_fsync, out) < 0) && (saved == 0)) saved = errno;
+    if ((opt->preserve) && (syscall(SYS_fchmod, out, source_st->st_mode & 07777) < 0) && (saved == 0)) saved = errno;
     syscall(SYS_close, in); syscall(SYS_close, out);
     if (done != (uint64_t)source_st->st_size) { errno = saved ? saved : EIO; emit_log("ERROR", "copy", dest, errno); return -1; }
     stats->bytes += done - (uint64_t)start;
@@ -329,13 +406,13 @@ static int copy_tree(const char *source, const char *dest, const struct options 
     int dest_dir = path_is_dir(dest, &dest_st);
     if (dest_dir < 0) {
         if (errno != ENOENT) return -1;
-        if (syscall(SYS_mkdir, dest, (st.st_mode & 07777) | 0700) < 0 && errno != EEXIST) return -1;
+        if ((syscall(SYS_mkdir, dest, (st.st_mode & 07777) | 0700) < 0) && (errno != EEXIST)) return -1;
     }
     int dirfd = open_dest(source, O_RDONLY | O_DIRECTORY, 0);
     if (dirfd < 0) return -1;
-    char *entries = malloc(opt->buffer_size < 65536 ? 65536 : opt->buffer_size);
+    char *entries = malloc((opt->buffer_size < 65536) ? 65536 : opt->buffer_size);
     if (!entries) { syscall(SYS_close, dirfd); errno = ENOMEM; return -1; }
-    size_t entries_size = opt->buffer_size < 65536 ? 65536 : opt->buffer_size;
+    size_t entries_size = (opt->buffer_size < 65536) ? 65536 : opt->buffer_size;
     for (;;) {
         int n = (int)syscall(SYS_getdents64, dirfd, entries, entries_size);
         if (n == 0) break;
@@ -343,9 +420,11 @@ static int copy_tree(const char *source, const char *dest, const struct options 
         for (int off = 0; off < n;) {
             struct linux_dirent64 *entry = (struct linux_dirent64 *)(entries + off);
             if (entry->d_reclen < offsetof(struct linux_dirent64, d_name) + 1) { errno = EIO; free(entries); syscall(SYS_close, dirfd); return -1; }
-            if (strcmp(entry->d_name, ".") != 0 && strcmp(entry->d_name, "..") != 0) {
+            (void)entry->d_type;
+            if ((strcmp(entry->d_name, ".") != 0) && (strcmp(entry->d_name, "..") != 0)) {
                 char src_child[PATH_MAX], dst_child[PATH_MAX];
-                if (join_path(src_child, sizeof(src_child), source, entry->d_name) < 0 || join_path(dst_child, sizeof(dst_child), dest, entry->d_name) < 0) { free(entries); syscall(SYS_close, dirfd); return -1; }
+                if ((join_path(src_child, sizeof(src_child), source, entry->d_name) < 0) ||
+                    (join_path(dst_child, sizeof(dst_child), dest, entry->d_name) < 0)) { free(entries); syscall(SYS_close, dirfd); return -1; }
                 struct stat child_st;
                 if (syscall(SYS_newfstatat, dirfd, entry->d_name, &child_st, AT_SYMLINK_NOFOLLOW) < 0) { free(entries); syscall(SYS_close, dirfd); return -1; }
                 if (opt->info) show_info(src_child, &child_st);
@@ -354,7 +433,8 @@ static int copy_tree(const char *source, const char *dest, const struct options 
                 } else if (S_ISREG(child_st.st_mode)) {
                     if (opt->sync) {
                         struct stat old;
-                        if (syscall(SYS_newfstatat, AT_FDCWD, dst_child, &old, AT_SYMLINK_NOFOLLOW) == 0 && old.st_size == child_st.st_size && old.st_mtime == child_st.st_mtime) { stats->skipped++; off += entry->d_reclen; continue; }
+                        if ((syscall(SYS_newfstatat, AT_FDCWD, dst_child, &old, AT_SYMLINK_NOFOLLOW) == 0) &&
+                            (old.st_size == child_st.st_size) && (old.st_mtime == child_st.st_mtime)) { stats->skipped++; off += entry->d_reclen; continue; }
                     }
                     if (copy_file(src_child, dst_child, &child_st, opt, stats) < 0) { free(entries); syscall(SYS_close, dirfd); return -1; }
                     if (opt->preserve) (void)syscall(SYS_chmod, dst_child, child_st.st_mode & 07777);
@@ -374,22 +454,22 @@ int main(int argc, char **argv)
     const char *source = NULL, *dest = NULL;
     for (int i = 1; i < argc; i++) {
         const char *arg = argv[i];
-        if (strcmp(arg, "-r") == 0 || strcmp(arg, "--recursive") == 0) opt.recursive = 1;
-        else if (strcmp(arg, "-p") == 0 || strcmp(arg, "--preserve") == 0) opt.preserve = 1;
+        if ((strcmp(arg, "-r") == 0) || (strcmp(arg, "--recursive") == 0)) opt.recursive = 1;
+        else if ((strcmp(arg, "-p") == 0) || (strcmp(arg, "--preserve") == 0)) opt.preserve = 1;
         else if (strcmp(arg, "--progress") == 0) opt.progress = 1;
-        else if (strcmp(arg, "-v") == 0 || strcmp(arg, "--verify") == 0) opt.verify = 1;
+        else if ((strcmp(arg, "-v") == 0) || (strcmp(arg, "--verify") == 0)) opt.verify = 1;
         else if (strcmp(arg, "--resume") == 0) opt.resume = 1;
-        else if (strcmp(arg, "-i") == 0 || strcmp(arg, "--info") == 0) opt.info = 1;
+        else if ((strcmp(arg, "-i") == 0) || (strcmp(arg, "--info") == 0)) opt.info = 1;
         else if (strcmp(arg, "--benchmark") == 0) opt.benchmark = 1;
         else if (strcmp(arg, "--sync") == 0) opt.sync = 1;
         else if (strcmp(arg, "--verbose") == 0) opt.verbose = 1;
-        else if (strcmp(arg, "-h") == 0 || strcmp(arg, "--help") == 0) { usage(argv[0]); return 0; }
-        else if (strcmp(arg, "-b") == 0 || strcmp(arg, "--buffer") == 0) {
-            if (++i >= argc || parse_size(argv[i], &opt.buffer_size) < 0) die_usage("invalid buffer size");
-        } else if (strcmp(arg, "-l") == 0 || strcmp(arg, "--log") == 0) {
+        else if ((strcmp(arg, "-h") == 0) || (strcmp(arg, "--help") == 0)) { usage(argv[0]); return 0; }
+        else if ((strcmp(arg, "-b") == 0) || (strcmp(arg, "--buffer") == 0)) {
+            if ((++i >= argc) || (parse_size(argv[i], &opt.buffer_size) < 0)) die_usage("invalid buffer size");
+        } else if ((strcmp(arg, "-l") == 0) || (strcmp(arg, "--log") == 0)) {
             if (++i >= argc) die_usage("--log requires a path");
             opt.log_path = argv[i];
-        } else if (arg[0] == '-' && arg[1] != '\0') die_usage("unknown option");
+        } else if ((arg[0] == '-') && (arg[1] != '\0')) die_usage("unknown option");
         else if (!source) source = arg;
         else if (!dest) dest = arg;
         else die_usage("expected exactly SOURCE and DEST");
@@ -409,7 +489,7 @@ int main(int argc, char **argv)
         if (strlen(dest) >= sizeof(final_dest)) { errno = ENAMETOOLONG; perror("mycp: destination"); return 1; }
         strcpy(final_dest, dest);
     }
-    if (opt.info && source_type == 1) show_info(source, &source_st);
+    if ((opt.info) && (source_type == 1)) show_info(source, &source_st);
     struct stats stats = {0};
     double begin = now_seconds();
     int result = copy_tree(source, final_dest, &opt, &stats);
@@ -423,7 +503,7 @@ int main(int argc, char **argv)
         return 1;
     }
     if (opt.benchmark) {
-        double mbps = elapsed > 0.0 ? ((double)stats.bytes / (1024.0 * 1024.0)) / elapsed : 0.0;
+        double mbps = (elapsed > 0.0) ? (((double)stats.bytes / (1024.0 * 1024.0)) / elapsed) : 0.0;
         char line[512]; int n = snprintf(line, sizeof(line), "mycp: files=%llu bytes=%llu skipped=%llu verified=%llu time=%.3fs throughput=%.2f MiB/s\n", (unsigned long long)stats.files, (unsigned long long)stats.bytes, (unsigned long long)stats.skipped, (unsigned long long)stats.verified, elapsed, mbps);
         if (n > 0) (void)write_all(STDOUT_FILENO, line, (size_t)n);
     }

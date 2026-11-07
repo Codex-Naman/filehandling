@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-MYCP=${MYCP:-./mycp}
+MYCP=${MYCP:-build/mycp}
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 

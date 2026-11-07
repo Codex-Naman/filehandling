@@ -7,15 +7,26 @@
 ```sh
 make
 make test
+make integration
+make gtest
+make valgrind
+make coverage
+make misra
+make misra-platform
 ```
+
+The byte-copy, verification, and resume algorithms live in the portable
+`src/mycp_core.c`/`include/mycp_core.h` layer. Linux file descriptors and filesystem
+syscalls remain in the executable adapter in `src/mycp.c`; see
+`MISRA_DEVIATIONS.md` for the platform boundary and its review requirements.
 
 ## Examples
 
 ```sh
-./mycp --preserve --verify --progress source.img /backup/source.img
-./mycp -r --preserve --resume --progress /srv/data /backup/data
-./mycp -r --sync --verify --benchmark --log /var/log/mycp.log /srv/data /backup/data
-./mycp --info source.img /dev/null
+./build/mycp --preserve --verify --progress source.img /backup/source.img
+./build/mycp -r --preserve --resume --progress /srv/data /backup/data
+./build/mycp -r --sync --verify --benchmark --log /var/log/mycp.log /srv/data /backup/data
+./build/mycp --info source.img /dev/null
 ```
 
 ## Backup/recovery mapping

@@ -26,7 +26,9 @@ protected:
     }
 
     int run(const std::string &arguments) const {
-        return std::system(("./mycp " + arguments).c_str());
+        const char *configured = std::getenv("MYCP");
+        const std::string executable = (configured != nullptr) ? configured : "build/mycp";
+        return std::system((executable + " " + arguments).c_str());
     }
 
     static std::string read_file(const fs::path &path) {
