@@ -26,10 +26,10 @@
 #define SYS_getdents64 __NR_getdents64
 #endif
 
-#define DEFAULT_BUFFER (1024U * 1024U)
+#define DEFAULT_BUFFER 1024U
 #define MAX_BUFFER (64U * 1024U * 1024U)
 #define COPY_MODE 0777
-#define PROGRESS_WIDTH 30U
+#define PROGRESS_WIDTH 10U
 
 struct options {
     size_t buffer_size;
@@ -73,7 +73,7 @@ static void usage(const char *name)
         "Low-level Linux file copy and backup utility.\n\n"
         "Options:\n"
         "  -r, --recursive       copy directories recursively\n"
-        "  -b, --buffer SIZE     buffer size (e.g. 64K, 1M; default 1M)\n"
+        "  -b, --buffer SIZE     buffer size in bytes (e.g. 512, 1K; default 1024)\n"
         "  -p, --preserve        preserve permission bits\n"
         "      --progress       show progress for regular files\n"
         "  -v, --verify          verify copied bytes\n"
@@ -199,20 +199,19 @@ static void show_info(const char *path, const struct stat *st)
 static void print_progress(const char *path, uint64_t done, uint64_t total)
 {
     char line[PATH_MAX + 128];
-    unsigned percent = total ? (unsigned)((done * 100ULL) / total) : 100U;
-    if (percent > 100U) percent = 100U;
+    double percent = total ? ((double)done * 100.0) / (double)total : 100.0;
+    if (percent > 100.0) percent = 100.0;
 
-    unsigned filled = (percent * PROGRESS_WIDTH) / 100U;
+    unsigned bucket = (unsigned)(percent / 10.0);
+    if (bucket > 10U) bucket = 10U;
+
     char bar[PROGRESS_WIDTH + 1U];
-    for (unsigned i = 0; i < PROGRESS_WIDTH; i++) bar[i] = '-';
-    if (filled == PROGRESS_WIDTH) {
-        for (unsigned i = 0; i < PROGRESS_WIDTH; i++) bar[i] = '#';
-    } else if (filled > 0) {
-        for (unsigned i = 0; i < filled; i++) bar[i] = '#';
+    for (unsigned i = 0; i < PROGRESS_WIDTH; i++) {
+        bar[i] = i < bucket ? '#' : '-';
     }
     bar[PROGRESS_WIDTH] = '\0';
 
-    int n = snprintf(line, sizeof(line), "\r[%s%u%%] %s (%llu/%llu bytes)", bar, percent,
+    int n = snprintf(line, sizeof(line), "[%s] %.2f%% %s (%llu/%llu bytes)\n", bar, percent,
                      path, (unsigned long long)done, (unsigned long long)total);
     if (n > 0) (void)write_all(STDERR_FILENO, line, (size_t)n);
 }
@@ -292,11 +291,12 @@ static int copy_file(const char *source, const char *dest, const struct stat *so
         if (n == 0) break;
         if (write_all(out, buffer, (size_t)n) < 0) break;
         done += (uint64_t)n;
-        if (opt->progress) print_progress(dest, done, (uint64_t)source_st->st_size);
+        if (opt->progress) {
+            print_progress(dest, done, (uint64_t)source_st->st_size);
+        }
     }
     int saved = errno;
     free(buffer);
-    if (opt->progress) (void)write_all(STDERR_FILENO, "\n", 1);
     if (syscall(SYS_fsync, out) < 0 && saved == 0) saved = errno;
     if (opt->preserve && syscall(SYS_fchmod, out, source_st->st_mode & 07777) < 0 && saved == 0) saved = errno;
     syscall(SYS_close, in); syscall(SYS_close, out);
