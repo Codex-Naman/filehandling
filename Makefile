@@ -73,20 +73,36 @@ coverage:
 	@rm -rf $(COVERAGE_DIR)
 	@mkdir -p $(COVERAGE_DIR)
 	@touch $(COVERAGE_DIR)/.gitkeep
+	@rm -f mycp.gcda mycp.gcno mycp_core.gcda mycp_core.gcno core_coverage.gcda core_coverage.gcno *.gcov
 	$(CC) -O0 -g -std=c11 -Wall -Wextra -Wpedantic --coverage \
-		$(CPPFLAGS) -o $(COVERAGE_DIR)/mycp $(SRC_DIR)/mycp.c $(SRC_DIR)/mycp_core.c
+		$(CPPFLAGS) -c $(SRC_DIR)/mycp.c -o $(COVERAGE_DIR)/mycp.o
+	$(CC) -O0 -g -std=c11 -Wall -Wextra -Wpedantic --coverage \
+		$(CPPFLAGS) -c $(SRC_DIR)/mycp_core.c -o $(COVERAGE_DIR)/mycp_core.o
+	$(CC) -O0 -g -std=c11 -Wall -Wextra -Wpedantic --coverage \
+		$(LDFLAGS) -o $(COVERAGE_DIR)/mycp $(COVERAGE_DIR)/mycp.o $(COVERAGE_DIR)/mycp_core.o
 	MYCP=./$(COVERAGE_DIR)/mycp sh $(TEST_DIR)/integration.sh
 	MYCP=./$(COVERAGE_DIR)/mycp sh $(TEST_DIR)/coverage_extra.sh
 	$(CC) -O0 -g -std=c11 -Wall -Wextra -Wpedantic --coverage \
-		$(CPPFLAGS) -o $(COVERAGE_DIR)/core_coverage $(TEST_DIR)/core_coverage.c $(SRC_DIR)/mycp_core.c
+		$(CPPFLAGS) -c $(TEST_DIR)/core_coverage.c -o $(COVERAGE_DIR)/core_coverage.o
+	$(CC) -O0 -g -std=c11 -Wall -Wextra -Wpedantic --coverage \
+		$(CPPFLAGS) -c $(SRC_DIR)/mycp_core.c -o $(COVERAGE_DIR)/core_mycp_core.o
+	$(CC) -O0 -g -std=c11 -Wall -Wextra -Wpedantic --coverage \
+		$(LDFLAGS) -o $(COVERAGE_DIR)/core_coverage \
+		$(COVERAGE_DIR)/core_coverage.o $(COVERAGE_DIR)/core_mycp_core.o
 	./$(COVERAGE_DIR)/core_coverage
 	@set -eu; \
-	for notes in $$(find $(COVERAGE_DIR) -maxdepth 1 -name '*.gcno' -print); do \
-		$(GCOV) -b -c -o $(COVERAGE_DIR) "$$notes"; \
+	for source in $(SRC_DIR)/mycp.c $(SRC_DIR)/mycp_core.c $(TEST_DIR)/core_coverage.c; do \
+		$(GCOV) -b -c -o $(COVERAGE_DIR) "$$source" || true; \
 	done; \
+	if ! find . -maxdepth 1 -name '*.gcov' -print -quit | grep -q .; then \
+		for notes in $$(find $(COVERAGE_DIR) -maxdepth 1 -name '*.gcno' -print); do \
+			$(GCOV) -b -c -o $(COVERAGE_DIR) "$$notes" || true; \
+		done; \
+	fi; \
 	for report in *.gcov; do \
 		if [ -f "$$report" ]; then mv -f "$$report" $(COVERAGE_DIR)/; fi; \
-	done
+	done; \
+	test -n "$$(find $(COVERAGE_DIR) -maxdepth 1 -name '*.gcov' -print -quit)"
 	@echo 'coverage: generated reports in $(COVERAGE_DIR)/'
 
 misra:
