@@ -24,11 +24,17 @@ endif
 .PHONY: all clean test verify verify-recursive integration gtest valgrind coverage cppcheck misra misra-platform test-all display help copy copy-paste recursive preserve backup log sync all-features
 
 SOURCE ?=
+FILE ?=
 DEST ?=
-LOG ?= mycp.log
+LOG ?=
 BUFFER ?= 1024
 
-COMMON_FLAGS = -r --buffer $(BUFFER) --preserve --progress --verify
+DEST_BASE = $(patsubst %/,%,$(DEST))
+SOURCE_BASE = $(notdir $(patsubst %/,%,$(SOURCE)))
+DEST_LOG = $(if $(shell test -d "$(DEST)" && echo yes),$(DEST_BASE)/$(SOURCE_BASE).log,$(DEST_BASE).log)
+LOG_PATH = $(if $(strip $(LOG)),$(LOG),$(DEST_LOG))
+DISPLAY_FILE = $(if $(strip $(FILE)),$(FILE),$(SOURCE))
+COMMON_FLAGS = -r --buffer $(BUFFER) --preserve --progress --verify --benchmark --resume --log "$(LOG_PATH)"
 
 all: $(MYCP)
 
@@ -49,7 +55,7 @@ test: $(MYCP)
 	mkdir -p "$$tmp/tree/nested/deeper"; printf 'nested\n' > "$$tmp/tree/a"; printf 'deep\n' > "$$tmp/tree/nested/deeper/file"; $(MYCP) -r --verify "$$tmp/tree" "$$tmp/out"; \
 	test -f "$$tmp/out/a"; test "$$(cat "$$tmp/out/a")" = nested; \
 	test -f "$$tmp/out/nested/deeper/file"; test "$$(cat "$$tmp/out/nested/deeper/file")" = deep; \
-	printf 'hello l' > "$$tmp/partial"; $(MYCP) --resume "$$tmp/source" "$$tmp/partial"; \
+	printf 'hello l' > "$$tmp/partial"; chmod 444 "$$tmp/partial"; $(MYCP) --resume "$$tmp/source" "$$tmp/partial"; \
 	test "$$(cat "$$tmp/source")" = "$$(cat "$$tmp/partial")"; \
 	printf 'wrong' > "$$tmp/mismatch"; $(MYCP) --resume "$$tmp/source" "$$tmp/mismatch"; \
 	test "$$(cat "$$tmp/source")" = "$$(cat "$$tmp/mismatch")"; echo 'tests: ok'
@@ -141,12 +147,12 @@ verify-recursive: $(MYCP)
 	echo 'recursive verification: ok'
 
 display:
-	@test -n "$(SOURCE)" || (echo 'SOURCE is required'; exit 2)
-	@test -e "$(SOURCE)" || (echo "SOURCE does not exist: $(SOURCE)"; exit 2)
-	@if [ -d "$(SOURCE)" ]; then \
-		find "$(SOURCE)" -exec stat --printf='Path: %n\nType: %F\nFile size: %s bytes\nMode: %a\nUID: %u\nGID: %g\nModified: %y\n\n' {} +; \
+	@test -n "$(DISPLAY_FILE)" || (echo 'FILE is required'; exit 2)
+	@test -e "$(DISPLAY_FILE)" || (echo "File does not exist: $(DISPLAY_FILE)"; exit 2)
+	@if [ -d "$(DISPLAY_FILE)" ]; then \
+		find "$(DISPLAY_FILE)" -exec stat --printf='Path: %n\nType: %F\nFile size: %s bytes\nMode: %a\nUID: %u\nGID: %g\nModified: %y\n\n' {} +; \
 	else \
-		stat --printf='Path: %n\nType: %F\nFile size: %s bytes\nMode: %a\nUID: %u\nGID: %g\nModified: %y\n\n' "$(SOURCE)"; \
+		stat --printf='Path: %n\nType: %F\nFile size: %s bytes\nMode: %a\nUID: %u\nGID: %g\nModified: %y\n\n' "$(DISPLAY_FILE)"; \
 	fi
 
 help:
@@ -156,7 +162,7 @@ help:
 	@echo '  make recursive SOURCE=directory DEST=directory'
 	@echo '  make preserve SOURCE=source DEST=destination'
 	@echo '  make log SOURCE=source DEST=destination LOG=path-to-log'
-	@echo '  make display SOURCE=file-or-directory'
+	@echo '  make display FILE=file-or-directory'
 	@echo '  make verify-recursive SOURCE=directory'
 	@echo '  make integration       run end-to-end shell tests'
 	@echo '  make gtest             run GoogleTest unit tests'
@@ -198,25 +204,25 @@ copy-paste: $(MYCP)
 		read -r selected; \
 		if [ -n "$$selected" ]; then buffer="$$selected"; fi; \
 	fi; \
-	$(MYCP) -r --preserve --progress --verify --buffer "$$buffer" \
+	$(MYCP) -r --preserve --progress --verify --benchmark --resume --log "$(LOG_PATH)" --buffer "$$buffer" \
 		"$(SOURCE)" "$(DEST)"
 
 recursive: $(MYCP)
 	@test -n "$(SOURCE)" || (echo 'SOURCE directory is required'; exit 2)
 	@test -n "$(DEST)" || (echo 'DEST directory is required'; exit 2)
-	$(MYCP) -r --buffer "$(BUFFER)" --preserve --progress --verify \
+	$(MYCP) -r --buffer "$(BUFFER)" --preserve --progress --verify --benchmark --resume --log "$(LOG_PATH)" \
 		"$(SOURCE)" "$(DEST)"
 
 preserve: $(MYCP)
 	@test -n "$(SOURCE)" || (echo 'SOURCE is required'; exit 2)
 	@test -n "$(DEST)" || (echo 'DEST is required'; exit 2)
-	$(MYCP) -r --buffer "$(BUFFER)" --preserve --progress --verify \
+	$(MYCP) -r --buffer "$(BUFFER)" --preserve --progress --verify --benchmark --resume --log "$(LOG_PATH)" \
 		"$(SOURCE)" "$(DEST)"
 
 log: $(MYCP)
 	@test -n "$(SOURCE)" || (echo 'SOURCE is required'; exit 2)
 	@test -n "$(DEST)" || (echo 'DEST is required'; exit 2)
-	$(MYCP) $(COMMON_FLAGS) --verbose --log "$(LOG)" \
+	$(MYCP) $(COMMON_FLAGS) --verbose \
 		"$(SOURCE)" "$(DEST)"
 
 backup: $(MYCP)
@@ -228,13 +234,13 @@ sync: $(MYCP)
 	@test -n "$(SOURCE)" || (echo 'SOURCE is required'; exit 2)
 	@test -n "$(DEST)" || (echo 'DEST is required'; exit 2)
 	$(MYCP) -r $(COMMON_FLAGS) --resume --sync --benchmark \
-		--log "$(LOG)" "$(SOURCE)" "$(DEST)"
+		"$(SOURCE)" "$(DEST)"
 
 all-features: $(MYCP)
 	@test -n "$(SOURCE)" || (echo 'SOURCE is required'; exit 2)
 	@test -n "$(DEST)" || (echo 'DEST is required'; exit 2)
 	$(MYCP) -r --buffer "$(BUFFER)" --preserve --progress --verify --resume --info \
-		--benchmark --sync --verbose --log "$(LOG)" \
+		--benchmark --sync --verbose --log "$(LOG_PATH)" \
 		"$(SOURCE)" "$(DEST)"
 
 
