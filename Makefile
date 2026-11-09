@@ -16,6 +16,7 @@ MYCP := $(BUILD_DIR)/mycp
 
 GTEST_CFLAGS ?= $(shell pkg-config --cflags gtest_main 2>/dev/null)
 GTEST_LIBS ?= $(shell pkg-config --libs gtest_main 2>/dev/null)
+GTEST_FS_LIBS ?= $(shell test -f "$(shell $(CXX) -print-file-name=libstdc++fs.a 2>/dev/null)" && echo -lstdc++fs)
 ifeq ($(strip $(GTEST_LIBS)),)
 GTEST_LIBS := -lgtest_main -lgtest -pthread
 endif
@@ -61,7 +62,7 @@ integration: $(MYCP)
 gtest: $(MYCP)
 	@mkdir -p $(BUILD_DIR)
 	$(CXX) -std=c++17 -Wall -Wextra -Wpedantic $(GTEST_CFLAGS) \
-		test/mycp_gtest.cpp $(GTEST_LIBS) -o $(BUILD_DIR)/mycp_gtest
+		test/mycp_gtest.cpp $(GTEST_LIBS) $(GTEST_FS_LIBS) -o $(BUILD_DIR)/mycp_gtest
 	MYCP=$(MYCP) $(BUILD_DIR)/mycp_gtest
 
 valgrind: $(MYCP)
@@ -71,6 +72,7 @@ valgrind: $(MYCP)
 coverage:
 	@rm -rf $(COVERAGE_DIR)
 	@mkdir -p $(COVERAGE_DIR)
+	@touch $(COVERAGE_DIR)/.gitkeep
 	$(CC) -O0 -g -std=c11 -Wall -Wextra -Wpedantic --coverage \
 		$(CPPFLAGS) -o $(COVERAGE_DIR)/mycp $(SRC_DIR)/mycp.c $(SRC_DIR)/mycp_core.c
 	MYCP=./$(COVERAGE_DIR)/mycp sh $(TEST_DIR)/integration.sh
@@ -81,6 +83,9 @@ coverage:
 	@set -eu; \
 	for notes in $$(find $(COVERAGE_DIR) -maxdepth 1 -name '*.gcno' -print); do \
 		$(GCOV) -b -c -o $(COVERAGE_DIR) "$$notes"; \
+	done; \
+	for report in *.gcov; do \
+		if [ -f "$$report" ]; then mv -f "$$report" $(COVERAGE_DIR)/; fi; \
 	done
 	@echo 'coverage: generated reports in $(COVERAGE_DIR)/'
 
@@ -149,7 +154,7 @@ help:
 	@echo '  make sync SOURCE=directory DEST=directory'
 	@echo '  make all-features SOURCE=source DEST=destination LOG=mycp.log'
 	@echo '  add BUFFER=512, 1024, 2048, or 4096 to choose the buffer size'
-	@echo '  override tools with CPPCHECK=, VALGRIND=, GCOV=, GTEST_CFLAGS=, GTEST_LIBS='
+	@echo '  override tools with CPPCHECK=, VALGRIND=, GCOV=, GTEST_CFLAGS=, GTEST_LIBS=, GTEST_FS_LIBS='
 	@echo ''
 	@echo 'Targets:'
 	@echo '  copy          copy files or directories with progress and verification'
