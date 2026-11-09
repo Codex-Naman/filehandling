@@ -1,5 +1,6 @@
 /build/
-/coverage/
+/coverage/*
+!/coverage/.gitkeep
 /mycp
 /mycp.c.gcov
 /coverage/mycp_core.c.gcov
