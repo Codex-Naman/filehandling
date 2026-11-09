@@ -2,11 +2,12 @@
 set -eu
 
 MYCP=${MYCP:-build/mycp}
+VALGRIND=${VALGRIND:-valgrind}
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
 run_checked() {
-	valgrind --quiet --leak-check=full --show-leak-kinds=all \
+	"$VALGRIND" --quiet --leak-check=full --show-leak-kinds=all \
 		--track-origins=yes --error-exitcode=1 "$MYCP" "$@"
 }
 

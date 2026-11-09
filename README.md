@@ -4,6 +4,18 @@
 
 ## Build and test
 
+On Debian/Ubuntu:
+
+```sh
+sudo apt-get install build-essential pkg-config libgtest-dev cppcheck valgrind
+```
+
+On RHEL/Fedora-compatible systems:
+
+```sh
+sudo dnf install gcc gcc-c++ make pkgconf-pkg-config gtest-devel cppcheck valgrind
+```
+
 ```sh
 make
 make test
@@ -14,6 +26,24 @@ make coverage
 make misra
 make misra-platform
 ```
+
+If test tools are installed in user-owned directories on a company RHEL server,
+pass their paths and GoogleTest flags without using `sudo`:
+
+```sh
+make cppcheck CPPCHECK="$HOME/tools/cppcheck"
+make misra CPPCHECK="$HOME/tools/cppcheck"
+make gtest \
+  GTEST_CFLAGS="-I$HOME/tools/gtest/include" \
+  GTEST_LIBS="-L$HOME/tools/gtest/lib -lgtest_main -lgtest -pthread"
+make valgrind VALGRIND="$HOME/tools/valgrind/bin/valgrind"
+make coverage GCOV="$HOME/tools/gcc/bin/gcov"
+```
+
+The same overrides are accepted by `make test-all`. `CC` and `CXX` can also be
+set to user-owned compiler binaries. If a tool is not available system-wide,
+the company must provide it or you must build it in a user-writable directory;
+the Makefile does not require root access.
 
 The byte-copy, verification, and resume algorithms live in the portable
 `src/mycp_core.c`/`include/mycp_core.h` layer. Linux file descriptors and filesystem

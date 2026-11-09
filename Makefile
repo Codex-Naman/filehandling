@@ -1,5 +1,8 @@
 CC ?= cc
 CXX ?= c++
+CPPCHECK ?= cppcheck
+VALGRIND ?= valgrind
+GCOV ?= gcov
 CFLAGS ?= -O2 -std=c11 -Wall -Wextra -Wpedantic
 CPPFLAGS ?= -Iinclude
 LDFLAGS ?=
@@ -11,10 +14,13 @@ INCLUDE_DIR ?= include
 TEST_DIR ?= test
 MYCP := $(BUILD_DIR)/mycp
 
-GTEST_CFLAGS := $(shell pkg-config --cflags gtest_main 2>/dev/null)
-GTEST_LIBS := $(shell pkg-config --libs gtest_main 2>/dev/null)
+GTEST_CFLAGS ?= $(shell pkg-config --cflags gtest_main 2>/dev/null)
+GTEST_LIBS ?= $(shell pkg-config --libs gtest_main 2>/dev/null)
+ifeq ($(strip $(GTEST_LIBS)),)
+GTEST_LIBS := -lgtest_main -lgtest -pthread
+endif
 
-.PHONY: all clean test verify verify-recursive integration gtest valgrind coverage misra misra-platform test-all display help copy copy-paste recursive preserve backup log sync all-features
+.PHONY: all clean test verify verify-recursive integration gtest valgrind coverage cppcheck misra misra-platform test-all display help copy copy-paste recursive preserve backup log sync all-features
 
 SOURCE ?=
 DEST ?=
@@ -53,16 +59,14 @@ integration: $(MYCP)
 	MYCP=$(MYCP) sh $(TEST_DIR)/integration.sh
 
 gtest: $(MYCP)
-	@command -v pkg-config >/dev/null 2>&1 || (echo 'pkg-config is required for gtest'; exit 2)
-	@test -n "$(GTEST_LIBS)" || (echo 'GoogleTest development files are required'; exit 2)
 	@mkdir -p $(BUILD_DIR)
 	$(CXX) -std=c++17 -Wall -Wextra -Wpedantic $(GTEST_CFLAGS) \
 		test/mycp_gtest.cpp $(GTEST_LIBS) -o $(BUILD_DIR)/mycp_gtest
 	MYCP=$(MYCP) $(BUILD_DIR)/mycp_gtest
 
 valgrind: $(MYCP)
-	@command -v valgrind >/dev/null 2>&1 || (echo 'Valgrind is required'; exit 2)
-	MYCP=$(MYCP) sh $(TEST_DIR)/valgrind.sh
+	@command -v $(VALGRIND) >/dev/null 2>&1 || (echo "Valgrind not found: $(VALGRIND)"; exit 2)
+	MYCP=$(MYCP) VALGRIND=$(VALGRIND) sh $(TEST_DIR)/valgrind.sh
 
 coverage:
 	@rm -rf $(COVERAGE_DIR)
@@ -74,26 +78,33 @@ coverage:
 	$(CC) -O0 -g -std=c11 -Wall -Wextra -Wpedantic --coverage \
 		$(CPPFLAGS) -o $(COVERAGE_DIR)/core_coverage $(TEST_DIR)/core_coverage.c $(SRC_DIR)/mycp_core.c
 	./$(COVERAGE_DIR)/core_coverage
-	gcov -b -c -o $(COVERAGE_DIR) $(COVERAGE_DIR)/mycp-mycp.gcno
-	@mv -f mycp.c.gcov $(COVERAGE_DIR)/mycp.c.gcov
-	gcov -b -c -o $(COVERAGE_DIR) $(COVERAGE_DIR)/core_coverage-mycp_core.gcno
-	@mv -f mycp_core.c.gcov $(COVERAGE_DIR)/mycp_core.c.gcov
-	@echo 'coverage: generated coverage/mycp.c.gcov and coverage/mycp_core.c.gcov'
+	@set -eu; \
+	for notes in $$(find $(COVERAGE_DIR) -maxdepth 1 -name '*.gcno' -print); do \
+		$(GCOV) -b -c -o $(COVERAGE_DIR) "$$notes"; \
+	done
+	@echo 'coverage: generated reports in $(COVERAGE_DIR)/'
 
 misra:
-	@command -v cppcheck >/dev/null 2>&1 || (echo 'Cppcheck is required'; exit 2)
-	cppcheck $(CPPFLAGS) --enable=all --inconclusive --error-exitcode=1 \
+	@command -v $(CPPCHECK) >/dev/null 2>&1 || (echo "Cppcheck not found: $(CPPCHECK)"; exit 2)
+	$(CPPCHECK) $(CPPFLAGS) --enable=all --inconclusive --error-exitcode=1 \
 		--std=c11 --addon=misra --suppress=missingIncludeSystem \
 		--suppress=unusedFunction --suppress=misra-c2012-8.7 \
+		--suppress=unmatchedSuppression \
 		$(SRC_DIR)/mycp_core.c
 
+cppcheck:
+	@command -v $(CPPCHECK) >/dev/null 2>&1 || (echo "Cppcheck not found: $(CPPCHECK)"; exit 2)
+	$(CPPCHECK) $(CPPFLAGS) --enable=warning,style,performance,portability \
+		--inconclusive --std=c11 --suppress=missingIncludeSystem \
+		$(SRC_DIR)/mycp.c $(SRC_DIR)/mycp_core.c
+
 misra-platform:
-	@command -v cppcheck >/dev/null 2>&1 || (echo 'Cppcheck is required'; exit 2)
+	@command -v $(CPPCHECK) >/dev/null 2>&1 || (echo "Cppcheck not found: $(CPPCHECK)"; exit 2)
 	@echo 'Linux adapter MISRA audit; findings are documented in MISRA_DEVIATIONS.md'
-	cppcheck $(CPPFLAGS) --enable=all --inconclusive --std=c11 --addon=misra \
+	$(CPPCHECK) $(CPPFLAGS) --enable=all --inconclusive --std=c11 --addon=misra \
 		--suppress=missingIncludeSystem $(SRC_DIR)/mycp.c
 
-test-all: integration gtest valgrind coverage misra
+test-all: integration gtest valgrind coverage cppcheck misra
 
 verify-recursive: $(MYCP)
 	@test -n "$(SOURCE)" || (echo 'SOURCE directory is required'; exit 2)
@@ -131,12 +142,14 @@ help:
 	@echo '  make valgrind          check for memory errors on Linux'
 	@echo '  make coverage          generate gcov coverage data'
 	@echo '  make misra             run MISRA-oriented Cppcheck analysis'
+	@echo '  make cppcheck          run standard Cppcheck analysis'
 	@echo '  make misra-platform    report Linux/POSIX adapter deviations'
 	@echo '  make test-all          run all quality checks'
 	@echo '  make backup SOURCE=source DEST=destination'
 	@echo '  make sync SOURCE=directory DEST=directory'
 	@echo '  make all-features SOURCE=source DEST=destination LOG=mycp.log'
 	@echo '  add BUFFER=512, 1024, 2048, or 4096 to choose the buffer size'
+	@echo '  override tools with CPPCHECK=, VALGRIND=, GCOV=, GTEST_CFLAGS=, GTEST_LIBS='
 	@echo ''
 	@echo 'Targets:'
 	@echo '  copy          copy files or directories with progress and verification'
