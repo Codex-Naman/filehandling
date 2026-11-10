@@ -2,6 +2,7 @@ CC ?= cc
 CXX ?= c++
 CPPCHECK ?= cppcheck
 VALGRIND ?= valgrind
+VALGRIND_CFLAGS ?= -O0 -g -std=c11 -Wall -Wextra -Wpedantic
 GCOV ?= gcov
 CFLAGS ?= -O2 -std=c11 -Wall -Wextra -Wpedantic
 CPPFLAGS ?= -Iinclude
@@ -71,7 +72,8 @@ gtest: $(MYCP)
 		test/mycp_gtest.cpp $(GTEST_LIBS) $(GTEST_FS_LIBS) -o $(BUILD_DIR)/mycp_gtest
 	MYCP=$(MYCP) $(BUILD_DIR)/mycp_gtest
 
-valgrind: $(MYCP)
+valgrind:
+	$(MAKE) -B $(MYCP) CFLAGS="$(VALGRIND_CFLAGS)"
 	@command -v $(VALGRIND) >/dev/null 2>&1 || (echo "Valgrind not found: $(VALGRIND)"; exit 2)
 	MYCP=$(MYCP) VALGRIND=$(VALGRIND) sh $(TEST_DIR)/valgrind.sh
 
